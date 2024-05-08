@@ -20,17 +20,21 @@ package main
 import (
 	"errors"
 	"log"
+	"sync"
+	"time"
 )
 
 // SessionManager keeps track of all sessions from creation, updating
 // to destroying.
 type SessionManager struct {
+	sync.Mutex
 	sessions map[string]Session
 }
 
 // Session stores the session's data
 type Session struct {
 	Data map[string]interface{}
+	ExpireDate time.Time
 }
 
 // NewSessionManager creates a new sessionManager
@@ -38,6 +42,8 @@ func NewSessionManager() *SessionManager {
 	m := &SessionManager{
 		sessions: make(map[string]Session),
 	}
+
+	go m.SessionCleaner()
 
 	return m
 }
@@ -49,8 +55,11 @@ func (m *SessionManager) CreateSession() (string, error) {
 		return "", err
 	}
 
+	m.Lock()
+	defer m.Unlock()
 	m.sessions[sessionID] = Session{
 		Data: make(map[string]interface{}),
+		ExpireDate: getExpiration(),
 	}
 
 	return sessionID, nil
@@ -58,11 +67,14 @@ func (m *SessionManager) CreateSession() (string, error) {
 
 // ErrSessionNotFound returned when sessionID not listed in
 // SessionManager
-var ErrSessionNotFound = errors.New("SessionID does not exists")
+var ErrSessionNotFound = errors.New("SessionID does not exist")
 
 // GetSessionData returns data related to session if sessionID is
 // found, errors otherwise
 func (m *SessionManager) GetSessionData(sessionID string) (map[string]interface{}, error) {
+	m.Lock()
+	defer m.Unlock()
+
 	session, ok := m.sessions[sessionID]
 	if !ok {
 		return nil, ErrSessionNotFound
@@ -77,17 +89,42 @@ func (m *SessionManager) UpdateSessionData(sessionID string, data map[string]int
 		return ErrSessionNotFound
 	}
 
+	m.Lock()
+	defer m.Unlock()
 	// Hint: you should renew expiry of the session here
 	m.sessions[sessionID] = Session{
 		Data: data,
+		ExpireDate: getExpiration(),
 	}
 
 	return nil
 }
 
+func getExpiration() time.Time {
+	return time.Now().Add(5 * time.Second)
+}
+
+func (m *SessionManager) SessionCleaner() {
+	ticker := time.Tick(time.Second)
+	go func() {
+		log.Println("session cleaner started")
+		for {
+			<-ticker
+			m.Lock()
+			for id, session := range m.sessions {
+				if time.Now().After(session.ExpireDate) {
+					delete(m.sessions, id)
+				}
+			}
+			m.Unlock()
+		}
+	}()
+}
+
 func main() {
 	// Create new sessionManager and new session
 	m := NewSessionManager()
+
 	sID, err := m.CreateSession()
 	if err != nil {
 		log.Fatal(err)
@@ -114,3 +151,19 @@ func main() {
 
 	log.Println("Get session data:", updatedData)
 }
+
+/* `$ go test`
+2024/05/08 14:03:18 session cleaner started
+2024/05/08 14:03:18 session cleaner started
+2024/05/08 14:03:25 session cleaner started
+PASS
+ok      github.com/loong/go-concurrency-exercises/5-session-cleaner     17.004s
+*/
+
+/* `$ go test --race`
+2024/05/08 14:04:20 session cleaner started
+2024/05/08 14:04:20 session cleaner started
+2024/05/08 14:04:27 session cleaner started
+PASS
+ok      github.com/loong/go-concurrency-exercises/5-session-cleaner     18.019s
+*/
